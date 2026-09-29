@@ -71,8 +71,13 @@
   <div id="sidebar">
     <div class="banner">⚠️ REPLAY MODE — Historical/Simulated Data — Kolhapur District Demo Dataset</div>
 
-    <button id="simulateBtn">Simulate Flood</button>
-    <button id="resetBtn" class="secondary">Reset to Baseline</button>
+    <button id="simulate-btn">Simulate Flood</button>
+    <button id="reset-btn" class="secondary">Reset to Baseline</button>
+    <span id="sim-status" role="status" aria-live="polite" style="display:block;font-size:12px;margin-bottom:10px;"></span>
+
+    <a href="report.html" target="_blank" style="display:block;text-align:center;font-size:12px;color:#A31111;margin-bottom:14px;">
+      📍 Submit a ground report
+    </a>
 
     <h2>Settlements</h2>
     <div id="settlement-list"></div>
@@ -82,6 +87,7 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script src="sim-controls.js"></script>
 <script>
 // ---------------------------------------------------------------
 // DUMMY DATA — replace with fetch() calls to the real FastAPI
@@ -221,11 +227,32 @@ function renderSidebarList() {
   });
 }
 
-function showEvidence(settlementId) {
+async function showEvidence(settlementId) {
   const s = settlements.find(x => x.id === settlementId);
-  const ev = evidenceBySettlement[settlementId];
+  if (!s) return;
   const box = document.getElementById('evidence-box');
-  if (!s || !ev) { box.style.display = 'none'; return; }
+
+  let ev = evidenceBySettlement[settlementId]; // local-demo fallback
+
+  if (USE_LIVE_BACKEND) {
+    try {
+      const res = await fetch(`${BACKEND_BASE}/api/settlements/${settlementId}/risk`);
+      const data = await res.json();
+      ev = {
+        rainfall_mm: data.evidence.rainfall.value_mm_24h,
+        elevation: data.evidence.elevation.category,
+        historical_risk: data.evidence.historical_risk.category,
+        report_count: data.evidence.ground_reports.count,
+        nearby_closures: 0
+      };
+      s.confidence_pct = data.risk.confidence_pct;
+      s.risk_level = data.risk.risk_level;
+    } catch (err) {
+      console.error("Could not fetch live evidence, showing local fallback.", err);
+    }
+  }
+
+  if (!ev) { box.style.display = 'none'; return; }
 
   box.style.display = 'block';
   box.innerHTML = `
@@ -323,13 +350,32 @@ function haversine(lat1, lon1, lat2, lon2) {
 async function fetchSettlements() {
   if (!USE_LIVE_BACKEND) return settlements;
   const res = await fetch(`${BACKEND_BASE}/api/settlements`);
-  return await res.json();
+  const data = await res.json();
+  return data.settlements; // backend wraps the array as { settlements: [...] }
 }
 
 async function fetchRoads() {
   if (!USE_LIVE_BACKEND) return roads;
   const res = await fetch(`${BACKEND_BASE}/api/roads`);
-  return await res.json();
+  const data = await res.json(); // { roads: [...], nodes: [...] }
+
+  // Backend's emergency center has real coordinates/id (EC001) — sync it in
+  const ec = data.nodes.find(n => n.type === "emergency_center");
+  if (ec) {
+    emergencyCenter.id = ec.id;
+    emergencyCenter.name = ec.name;
+    emergencyCenter.lat = ec.lat;
+    emergencyCenter.lng = ec.lng;
+  }
+
+  // Normalize backend's { from_node: {id,...}, to_node: {id,...} } into
+  // the flat { from, to } shape the rest of this file already uses
+  return data.roads.map(r => ({
+    id: r.id,
+    from: r.from_node.id,
+    to: r.to_node.id,
+    status: r.status
+  }));
 }
 
 async function fetchRoute(fromId, toId) {
@@ -344,14 +390,48 @@ async function fetchRoute(fromId, toId) {
 }
 
 // ---------------------------------------------------------------
-// Simulate Flood / Reset buttons
+// window.refreshMap() — the single hook sim-controls.js calls after
+// it successfully POSTs to /api/simulation/trigger-flood or
+// /api/simulation/reset. It re-fetches state and redraws everything.
+//
+// Until the real backend is live (USE_LIVE_BACKEND = false), the
+// buttons still work locally: sim-controls.js's own POST calls will
+// fail without a server, so for local-only testing before backend
+// integration, use localDemoSimulate()/localDemoReset() below, or
+// just flip USE_LIVE_BACKEND to true once Shubham/Samartha's APIs
+// are running and let sim-controls.js drive everything for real.
 // ---------------------------------------------------------------
 
 const baselineSettlements = JSON.parse(JSON.stringify(settlements));
 const baselineRoads = JSON.parse(JSON.stringify(roads));
 
-document.getElementById('simulateBtn').onclick = async () => {
-  // Bump risk on two settlements
+window.refreshMap = async function refreshMap() {
+  const freshSettlements = await fetchSettlements();
+  settlements.length = 0;
+  settlements.push(...freshSettlements);
+
+  const freshRoads = await fetchRoads();
+  roads = freshRoads;
+
+  drawSettlements();
+  drawRoads();
+  renderSidebarList();
+
+  // Redraw a route to whichever settlement is currently highest risk
+  const top = [...settlements].sort((a, b) =>
+    ["low", "moderate", "high", "critical"].indexOf(b.risk_level) -
+    ["low", "moderate", "high", "critical"].indexOf(a.risk_level)
+  )[0];
+  if (top) {
+    const path = await fetchRoute(emergencyCenter.id, top.id);
+    drawRoute(path);
+  }
+};
+
+// Local-only demo helpers (used before the backend exists / for quick
+// manual testing). Call these from the browser console if you want to
+// see the flood scenario without sim-controls.js or a running backend.
+window.localDemoSimulate = async function () {
   settlements.forEach(s => {
     if (s.id === "s2") { s.risk_level = "critical"; s.confidence_pct = 93; }
     if (s.id === "s3") { s.risk_level = "critical"; s.confidence_pct = 88; }
@@ -360,21 +440,16 @@ document.getElementById('simulateBtn').onclick = async () => {
   evidenceBySettlement.s2.report_count += 3;
   evidenceBySettlement.s3.rainfall_mm = 175;
   evidenceBySettlement.s3.report_count += 2;
-
-  // Close the most direct road to s2
   roads = roads.map(r => r.id === "r4" ? { ...r, status: "closed" } : r);
 
   drawSettlements();
   drawRoads();
   renderSidebarList();
-
-  // Recalculate route to the now-critical settlement, avoiding the closed road
   const path = await fetchRoute(emergencyCenter.id, "s2");
   drawRoute(path);
-  if (!path) alert("No valid route found to Shirol!");
 };
 
-document.getElementById('resetBtn').onclick = () => {
+window.localDemoReset = function () {
   settlements.length = 0;
   settlements.push(...JSON.parse(JSON.stringify(baselineSettlements)));
   roads = JSON.parse(JSON.stringify(baselineRoads));

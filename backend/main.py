@@ -45,6 +45,54 @@ def root():
     }
 
 
+from risk_engine.risk_engine import calculate_report_trust
+
+
+class ReportCreate(BaseModel):
+    report_type: str
+    description: str = ""
+    latitude: float
+    longitude: float
+    reported_at: str | None = None
+
+
+@app.post("/api/reports")
+def submit_report(body: ReportCreate):
+    """
+    Match a citizen report to the nearest settlement, score its trust
+    using nearby corroboration + rainfall agreement, store it, and
+    return the updated risk so the frontend can show a fresh confidence.
+    """
+    def dist(s):
+        return ((s["lat"] - body.latitude) ** 2 + (s["lng"] - body.longitude) ** 2) ** 0.5
+
+    nearest = min(settlements, key=dist)
+
+    nearby_reports = len(nearest["ground_reports"])
+    flood_types = {"road_flooded", "water_rising", "bridge_damaged", "rescue_required"}
+    rainfall_agreement = 1.0 if (
+        body.report_type in flood_types and nearest["rainfall_mm_24h"] >= 60
+    ) else 0.5
+
+    trust = calculate_report_trust(nearby_reports, rainfall_agreement)
+
+    nearest["ground_reports"].append({
+        "report_type": body.report_type,
+        "description": body.description,
+        "latitude": body.latitude,
+        "longitude": body.longitude,
+        "reported_at": body.reported_at,
+        "trust_score": trust,
+    })
+
+    return {
+        "message": "Report received",
+        "matched_settlement": nearest["id"],
+        "trust_score": trust,
+        "updated_risk": calculate_risk(nearest),
+    }
+
+
 # ===========================================================================
 # RISK ENGINE  (Shubham's endpoints — unchanged)
 # ===========================================================================
