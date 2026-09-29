@@ -12,7 +12,7 @@
  */
 (() => {
   // ---- Config: match to backend endpoints ----
-  const API_BASE = "";                       // "" = same origin, or "http://localhost:8000"
+  const API_BASE = "http://localhost:8000";                       // "" = same origin, or "http://localhost:8000"
   const SIMULATE_URL = API_BASE + "/api/simulation/trigger-flood";
   const RESET_URL    = API_BASE + "/api/simulation/reset";
   const SNAPSHOT_URL = API_BASE + "/api/settlements";   // any GET that returns settlement risk/priority JSON
