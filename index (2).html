@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FloodLens — Kolhapur District</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" />
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; font-family: Arial, sans-serif; }
+  #app { display: flex; height: 100vh; }
+  #map { flex: 1; height: 100%; }
+  #sidebar {
+    width: 320px;
+    background: #fafafa;
+    border-left: 1px solid #ddd;
+    padding: 16px;
+    overflow-y: auto;
+    box-sizing: border-box;
+  }
+  #sidebar h2 { margin-top: 0; font-size: 18px; color: #A31111; }
+  #sidebar h3 { font-size: 14px; margin-bottom: 6px; color: #333; }
+  .banner {
+    background: #fff3cd;
+    border: 1px solid #ffe08a;
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    margin-bottom: 14px;
+  }
+  .settlement-card {
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 10px;
+    cursor: pointer;
+    background: white;
+  }
+  .settlement-card:hover { border-color: #A31111; }
+  .settlement-card .name { font-weight: bold; font-size: 14px; }
+  .settlement-card .risk { font-size: 12px; font-weight: bold; margin-top: 4px; }
+  .risk-low { color: #2e7d32; }
+  .risk-moderate { color: #b8860b; }
+  .risk-high { color: #d2691e; }
+  .risk-critical { color: #c62828; }
+  button {
+    width: 100%;
+    padding: 10px;
+    margin-bottom: 8px;
+    background: #A31111;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  button:hover { background: #7d0d0d; }
+  button.secondary { background: #555; }
+  #evidence-box {
+    font-size: 12px;
+    background: #f5f5f5;
+    border-radius: 6px;
+    padding: 8px;
+    margin-top: 8px;
+    display: none;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="map"></div>
+  <div id="sidebar">
+    <div class="banner">⚠️ REPLAY MODE — Historical/Simulated Data — Kolhapur District Demo Dataset</div>
+
+    <button id="simulateBtn">Simulate Flood</button>
+    <button id="resetBtn" class="secondary">Reset to Baseline</button>
+
+    <h2>Settlements</h2>
+    <div id="settlement-list"></div>
+
+    <div id="evidence-box"></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script>
+// ---------------------------------------------------------------
+// DUMMY DATA — replace with fetch() calls to the real FastAPI
+// endpoints once Shubham's (/api/settlements, /api/settlements/{id}/risk)
+// and Samartha's (/api/roads, /api/route) services are running.
+// Shapes below match what the backend team should return.
+// ---------------------------------------------------------------
+
+const BACKEND_BASE = "http://localhost:8000"; // change once backend is up
+const USE_LIVE_BACKEND = false; // flip to true once teammates' APIs are ready
+
+const settlements = [
+  { id: "s1", name: "Kolhapur City Core", lat: 16.7050, lng: 74.2433, population: 5000, risk_level: "moderate", confidence_pct: 74 },
+  { id: "s2", name: "Shirol",              lat: 16.7833, lng: 74.6167, population: 2200, risk_level: "critical", confidence_pct: 89 },
+  { id: "s3", name: "Hatkanangle",         lat: 16.7667, lng: 74.4667, population: 1800, risk_level: "high",     confidence_pct: 81 },
+  { id: "s4", name: "Panhala",             lat: 16.8100, lng: 74.1075, population: 900,  risk_level: "low",      confidence_pct: 62 },
+  { id: "s5", name: "Karvir",              lat: 16.6500, lng: 74.2000, population: 1500, risk_level: "moderate", confidence_pct: 70 }
+];
+
+// One emergency/response center
+const emergencyCenter = { id: "ec1", name: "Kolhapur Emergency Center", lat: 16.6950, lng: 74.2200 };
+
+// Road edges: from_id -> to_id, with a status
+let roads = [
+  { id: "r1", from: "ec1", to: "s1", status: "open" },
+  { id: "r2", from: "s1", to: "s5", status: "open" },
+  { id: "r3", from: "s1", to: "s3", status: "open" },
+  { id: "r4", from: "s3", to: "s2", status: "open" },
+  { id: "r5", from: "s1", to: "s4", status: "open" },
+  { id: "r6", from: "s4", to: "s2", status: "open" },
+  { id: "r7", from: "ec1", to: "s5", status: "open" },
+  { id: "r8", from: "s5", to: "s3", status: "open" }
+];
+
+const evidenceBySettlement = {
+  s1: { rainfall_mm: 95, elevation: "medium", historical_risk: "medium", report_count: 1, nearby_closures: 0 },
+  s2: { rainfall_mm: 180, elevation: "low", historical_risk: "high", report_count: 5, nearby_closures: 2 },
+  s3: { rainfall_mm: 150, elevation: "low", historical_risk: "high", report_count: 3, nearby_closures: 1 },
+  s4: { rainfall_mm: 60, elevation: "high", historical_risk: "low", report_count: 0, nearby_closures: 0 },
+  s5: { rainfall_mm: 90, elevation: "medium", historical_risk: "medium", report_count: 1, nearby_closures: 0 }
+};
+
+// ---------------------------------------------------------------
+// Map setup
+// ---------------------------------------------------------------
+
+const map = L.map('map').setView([16.72, 74.32], 11);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors',
+  maxZoom: 18
+}).addTo(map);
+
+const riskColors = {
+  low: "#2e7d32",
+  moderate: "#f9a825",
+  high: "#e65100",
+  critical: "#c62828"
+};
+
+const roadColors = {
+  open: "#2e7d32",
+  moderate: "#f9a825",
+  closed: "#c62828"
+};
+
+let settlementMarkers = {};
+let roadLines = {};
+let routeLine = null;
+
+function nodeById(id) {
+  if (id === emergencyCenter.id) return emergencyCenter;
+  return settlements.find(s => s.id === id);
+}
+
+function drawSettlements() {
+  Object.values(settlementMarkers).forEach(m => map.removeLayer(m));
+  settlementMarkers = {};
+
+  settlements.forEach(s => {
+    const marker = L.circleMarker([s.lat, s.lng], {
+      radius: 10,
+      color: "#333",
+      weight: 1,
+      fillColor: riskColors[s.risk_level] || "#999",
+      fillOpacity: 0.9
+    }).addTo(map);
+
+    marker.bindPopup(`<b>${s.name}</b><br/>Risk: ${s.risk_level.toUpperCase()}<br/>Confidence: ${s.confidence_pct}%`);
+    marker.on('click', () => showEvidence(s.id));
+
+    settlementMarkers[s.id] = marker;
+  });
+
+  // Emergency center marker
+  L.marker([emergencyCenter.lat, emergencyCenter.lng], {
+    icon: L.divIcon({
+      className: '',
+      html: '<div style="background:#1565c0;color:white;border-radius:50%;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:bold;">EC</div>',
+      iconSize: [22, 22]
+    })
+  }).addTo(map).bindPopup(`<b>${emergencyCenter.name}</b>`);
+}
+
+function drawRoads() {
+  Object.values(roadLines).forEach(l => map.removeLayer(l));
+  roadLines = {};
+
+  roads.forEach(r => {
+    const from = nodeById(r.from);
+    const to = nodeById(r.to);
+    if (!from || !to) return;
+
+    const line = L.polyline([[from.lat, from.lng], [to.lat, to.lng]], {
+      color: roadColors[r.status] || "#999",
+      weight: 4,
+      opacity: 0.8
+    }).addTo(map);
+
+    line.bindTooltip(`Road ${r.id}: ${r.status.toUpperCase()}`);
+    roadLines[r.id] = line;
+  });
+}
+
+function renderSidebarList() {
+  const list = document.getElementById('settlement-list');
+  list.innerHTML = '';
+  settlements.forEach(s => {
+    const card = document.createElement('div');
+    card.className = 'settlement-card';
+    card.innerHTML = `
+      <div class="name">${s.name}</div>
+      <div class="risk risk-${s.risk_level}">${s.risk_level.toUpperCase()} · ${s.confidence_pct}% confidence</div>
+    `;
+    card.onclick = () => showEvidence(s.id);
+    list.appendChild(card);
+  });
+}
+
+function showEvidence(settlementId) {
+  const s = settlements.find(x => x.id === settlementId);
+  const ev = evidenceBySettlement[settlementId];
+  const box = document.getElementById('evidence-box');
+  if (!s || !ev) { box.style.display = 'none'; return; }
+
+  box.style.display = 'block';
+  box.innerHTML = `
+    <h3>${s.name} — Evidence</h3>
+    Rainfall: ${ev.rainfall_mm} mm/24h<br/>
+    Elevation: ${ev.elevation}<br/>
+    Historical risk: ${ev.historical_risk}<br/>
+    Ground reports: ${ev.report_count}<br/>
+    Nearby road closures: ${ev.nearby_closures}<br/>
+    <b>Confidence: ${s.confidence_pct}%</b>
+  `;
+
+  map.setView([s.lat, s.lng], 12);
+}
+
+function drawRoute(pathIds) {
+  if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+  if (!pathIds || pathIds.length < 2) return;
+
+  const latlngs = pathIds.map(id => {
+    const n = nodeById(id);
+    return [n.lat, n.lng];
+  });
+
+  routeLine = L.polyline(latlngs, {
+    color: "#1565c0",
+    weight: 6,
+    opacity: 0.9,
+    dashArray: "10,6"
+  }).addTo(map);
+}
+
+// ---------------------------------------------------------------
+// Simple in-browser Dijkstra so the demo works BEFORE the real
+// routing API exists. Once Samartha's /api/route is live, replace
+// this with a fetch() call — see fetchRoute() stub below.
+// ---------------------------------------------------------------
+
+function computeRouteLocally(fromId, toId) {
+  const nodes = new Set([emergencyCenter.id, ...settlements.map(s => s.id)]);
+  const adj = {};
+  nodes.forEach(n => adj[n] = []);
+
+  roads.forEach(r => {
+    if (r.status === "closed") return;
+    const from = nodeById(r.from), to = nodeById(r.to);
+    const dist = haversine(from.lat, from.lng, to.lat, to.lng);
+    adj[r.from].push({ to: r.to, dist });
+    adj[r.to].push({ to: r.from, dist });
+  });
+
+  const dist = {}, prev = {}, visited = new Set();
+  nodes.forEach(n => dist[n] = Infinity);
+  dist[fromId] = 0;
+
+  while (visited.size < nodes.size) {
+    let u = null, best = Infinity;
+    nodes.forEach(n => { if (!visited.has(n) && dist[n] < best) { best = dist[n]; u = n; } });
+    if (u === null) break;
+    visited.add(u);
+    if (u === toId) break;
+
+    adj[u].forEach(edge => {
+      const alt = dist[u] + edge.dist;
+      if (alt < dist[edge.to]) {
+        dist[edge.to] = alt;
+        prev[edge.to] = u;
+      }
+    });
+  }
+
+  if (dist[toId] === Infinity) return null; // no valid route
+
+  const path = [toId];
+  let cur = toId;
+  while (prev[cur] !== undefined) {
+    cur = prev[cur];
+    path.unshift(cur);
+  }
+  return path;
+}
+
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+// ---------------------------------------------------------------
+// Once the real backend is ready, swap these in:
+// ---------------------------------------------------------------
+
+async function fetchSettlements() {
+  if (!USE_LIVE_BACKEND) return settlements;
+  const res = await fetch(`${BACKEND_BASE}/api/settlements`);
+  return await res.json();
+}
+
+async function fetchRoads() {
+  if (!USE_LIVE_BACKEND) return roads;
+  const res = await fetch(`${BACKEND_BASE}/api/roads`);
+  return await res.json();
+}
+
+async function fetchRoute(fromId, toId) {
+  if (!USE_LIVE_BACKEND) return computeRouteLocally(fromId, toId);
+  const res = await fetch(`${BACKEND_BASE}/api/route`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ from_node_id: fromId, to_node_id: toId })
+  });
+  const data = await res.json();
+  return data.path || null;
+}
+
+// ---------------------------------------------------------------
+// Simulate Flood / Reset buttons
+// ---------------------------------------------------------------
+
+const baselineSettlements = JSON.parse(JSON.stringify(settlements));
+const baselineRoads = JSON.parse(JSON.stringify(roads));
+
+document.getElementById('simulateBtn').onclick = async () => {
+  // Bump risk on two settlements
+  settlements.forEach(s => {
+    if (s.id === "s2") { s.risk_level = "critical"; s.confidence_pct = 93; }
+    if (s.id === "s3") { s.risk_level = "critical"; s.confidence_pct = 88; }
+  });
+  evidenceBySettlement.s2.rainfall_mm = 210;
+  evidenceBySettlement.s2.report_count += 3;
+  evidenceBySettlement.s3.rainfall_mm = 175;
+  evidenceBySettlement.s3.report_count += 2;
+
+  // Close the most direct road to s2
+  roads = roads.map(r => r.id === "r4" ? { ...r, status: "closed" } : r);
+
+  drawSettlements();
+  drawRoads();
+  renderSidebarList();
+
+  // Recalculate route to the now-critical settlement, avoiding the closed road
+  const path = await fetchRoute(emergencyCenter.id, "s2");
+  drawRoute(path);
+  if (!path) alert("No valid route found to Shirol!");
+};
+
+document.getElementById('resetBtn').onclick = () => {
+  settlements.length = 0;
+  settlements.push(...JSON.parse(JSON.stringify(baselineSettlements)));
+  roads = JSON.parse(JSON.stringify(baselineRoads));
+  if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+  drawSettlements();
+  drawRoads();
+  renderSidebarList();
+  document.getElementById('evidence-box').style.display = 'none';
+};
+
+// ---------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------
+
+(async function init() {
+  drawSettlements();
+  drawRoads();
+  renderSidebarList();
+})();
+</script>
+</body>
+</html>
